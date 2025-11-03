@@ -43,15 +43,24 @@ import requests
 LOGGER = logging.getLogger(__name__)
 
 
-BASE_URL = "https://www.gsshop.com/some/product/api"
-"""Placeholder endpoint discovered via browser developer tools.
+AUTO_BASE_URL_TOKEN = "auto"
+"""Sentinel value instructing the scraper to probe known public APIs."""
 
-Replace this value with the actual API endpoint captured from the
-Network panel (typically an endpoint such as
-``https://api.gsshop.com/prdw/store/v1/goods``).  The remainder of the
-module is agnostic to the specific endpoint structure, and callers can
-override the value at runtime via the ``--base-url`` CLI flag.
+DEFAULT_BASE_URLS = [
+    "https://www.gsshop.com/api/prd/v2/goods",
+    "https://www.gsshop.com/api/prd/v1/goods",
+    "https://api.gsshop.com/prdw/store/v1/goods",
+]
+"""Candidate endpoints exposed to regular GS Shop visitors.
+
+The public site surfaces product listings through a handful of
+unauthenticated endpoints.  The scraper can iterate through this list
+automatically when ``--base-url auto`` (the default) is used, eliminating
+the need to capture a request manually from the browser developer tools.
 """
+
+BASE_URL = DEFAULT_BASE_URLS[0]
+"""Default endpoint used when a specific URL is supplied."""
 
 REFERER_URL = "https://www.gsshop.com/shop/wine/cate.gs?msectid=1548240"
 """Referer header that mimics navigation from the category page."""
@@ -63,7 +72,9 @@ DEFAULT_HEADERS: Dict[str, str] = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Referer": REFERER_URL,
+    "Origin": "https://www.gsshop.com",
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 """Baseline headers required to emulate a browser request.
 
@@ -71,6 +82,59 @@ Add cookies or authentication headers if the captured request requires
 it.  The defaults are intentionally lightweight so that developers can
 extend them for their own environment.
 """
+
+
+def resolve_candidate_base_urls(value: str) -> List[str]:
+    """Return the ordered list of endpoints the scraper should try."""
+
+    if not value or value.strip().lower() == AUTO_BASE_URL_TOKEN:
+        return DEFAULT_BASE_URLS
+    return [value]
+
+
+def _collect_from_single_base(
+    *,
+    target_count: int,
+    page_size: int,
+    delay_seconds: float,
+    headers: Optional[Dict[str, str]],
+    base_url: str,
+    params: Dict[str, object],
+) -> List[Product]:
+    """Collect products using ``base_url`` until ``target_count`` is met."""
+
+    items: Dict[str, Product] = {}
+    page = 1
+    session = requests.Session()
+
+    while len(items) < target_count:
+        products = fetch_products(
+            page=page,
+            page_size=page_size,
+            headers=headers,
+            session=session,
+            base_url=base_url,
+            **params,
+        )
+
+        if not products:
+            LOGGER.info("No products returned for page %s; stopping.", page)
+            break
+
+        for product in products:
+            items.setdefault(product.id, product)
+
+        LOGGER.info(
+            "Collected %s/%s products after page %s",
+            len(items),
+            target_count,
+            page,
+        )
+
+        page += 1
+        time.sleep(delay_seconds)
+
+    return list(items.values())
 
 
 @dataclass
@@ -191,50 +255,44 @@ def collect_products(
     page_size: int = 60,
     delay_seconds: float = 1.0,
     headers: Optional[Dict[str, str]] = None,
-    base_url: str = BASE_URL,
+    base_urls: Optional[Iterable[str]] = None,
     **params: object,
 ) -> List[Product]:
     """Collect products until ``target_count`` unique items are gathered.
 
     Parameters
     ----------
-    base_url:
-        Product API endpoint used for fetching data. Override the default
-        when invoking the script from environments such as GitHub Actions.
+    base_urls:
+        Ordered iterable of API endpoints to try. When ``None`` the function
+        uses :data:`BASE_URL`, but the CLI passes multiple public endpoints to
+        mimic a regular storefront visitor.
     """
 
-    items: Dict[str, Product] = {}
-    page = 1
-    session = requests.Session()
+    candidates = list(base_urls or [BASE_URL])
+    last_error: Optional[Exception] = None
 
-    while len(items) < target_count:
-        products = fetch_products(
-            page=page,
-            page_size=page_size,
-            headers=headers,
-            session=session,
-            base_url=base_url,
-            **params,
-        )
+    for base_url in candidates:
+        LOGGER.info("Attempting to scrape products from %s", base_url)
+        try:
+            return _collect_from_single_base(
+                target_count=target_count,
+                page_size=page_size,
+                delay_seconds=delay_seconds,
+                headers=headers,
+                base_url=base_url,
+                params=dict(params),
+            )
+        except requests.HTTPError as exc:
+            last_error = exc
+            LOGGER.warning("HTTP error from %s: %s", base_url, exc)
+        except requests.RequestException as exc:
+            last_error = exc
+            LOGGER.warning("Network error from %s: %s", base_url, exc)
 
-        if not products:
-            LOGGER.info("No products returned for page %s; stopping.", page)
-            break
+    if last_error:
+        raise last_error
 
-        for product in products:
-            items.setdefault(product.id, product)
-
-        LOGGER.info(
-            "Collected %s/%s products after page %s",
-            len(items),
-            target_count,
-            page,
-        )
-
-        page += 1
-        time.sleep(delay_seconds)
-
-    return list(items.values())
+    return []
 
 
 def export_to_csv(products: Iterable[Product], output_path: str) -> None:
@@ -280,8 +338,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-url",
-        default=BASE_URL,
-        help="GS Shop product API endpoint to call",
+        default=AUTO_BASE_URL_TOKEN,
+        help=(
+            "GS Shop product API endpoint to call. Use 'auto' to try known "
+            "public endpoints (default)."
+        ),
     )
     parser.add_argument(
         "--param",
@@ -332,14 +393,20 @@ def main() -> None:
     extra_params = parse_key_value_pairs(args.param)
     extra_headers = parse_key_value_pairs(args.header)
 
-    products = collect_products(
-        target_count=args.target_count,
-        page_size=args.page_size,
-        delay_seconds=args.delay,
-        headers={**DEFAULT_HEADERS, **extra_headers} if extra_headers else None,
-        base_url=args.base_url,
-        **extra_params,
-    )
+    candidate_base_urls = resolve_candidate_base_urls(args.base_url)
+
+    try:
+        products = collect_products(
+            target_count=args.target_count,
+            page_size=args.page_size,
+            delay_seconds=args.delay,
+            headers={**DEFAULT_HEADERS, **extra_headers} if extra_headers else None,
+            base_urls=candidate_base_urls,
+            **extra_params,
+        )
+    except requests.RequestException as exc:
+        LOGGER.error("Failed to collect products: %s", exc)
+        return
 
     if not products:
         LOGGER.warning("No products collected. Verify the API endpoint and parameters.")
