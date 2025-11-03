@@ -62,6 +62,15 @@ the need to capture a request manually from the browser developer tools.
 BASE_URL = DEFAULT_BASE_URLS[0]
 """Default endpoint used when a specific URL is supplied."""
 
+DEFAULT_CATEGORY_ID = "1548240"
+"""Category identifier for the GS Shop liquor section."""
+
+CATEGORY_PARAM_KEYS = ("msectid", "sectid", "categoryId", "disp_ctg_no")
+"""Keys that identify the requested product category in API calls."""
+
+DETAIL_URL_TEMPLATE = "https://www.gsshop.com/shop/detail/main.gs?goodsNo={goods_no}"
+"""Fallback template used when the API does not expose an explicit URL."""
+
 REFERER_URL = "https://www.gsshop.com/shop/wine/cate.gs?msectid=1548240"
 """Referer header that mimics navigation from the category page."""
 
@@ -134,6 +143,9 @@ def _collect_from_single_base(
         page += 1
         time.sleep(delay_seconds)
 
+    LOGGER.info(
+        "Finished scraping %s products from %s", len(items), base_url
+    )
     return list(items.values())
 
 
@@ -157,35 +169,71 @@ class Product:
         directly on the product object).
         """
 
-        goods_no = str(payload.get("goodsNo") or payload.get("goodsId"))
+        goods_no = str(
+            payload.get("goodsNo")
+            or payload.get("goodsId")
+            or payload.get("itemId")
+            or payload.get("id")
+        )
         if not goods_no:
             raise ValueError("Unable to determine product ID from payload")
 
-        name = str(payload.get("goodsNm") or payload.get("name") or "")
+        name = str(
+            payload.get("goodsNm")
+            or payload.get("goodsNm1")
+            or payload.get("goodsName")
+            or payload.get("productName")
+            or payload.get("name")
+            or payload.get("title")
+            or ""
+        )
         if not name:
             raise ValueError(
                 f"Product {goods_no!r} is missing a name: {payload!r}"
             )
 
+        price_candidates = [
+            payload.get("sellPrice"),
+            payload.get("salePrice"),
+            payload.get("goodsPrice"),
+            payload.get("price"),
+            payload.get("finalPrice"),
+        ]
+
         price_info = payload.get("price") or {}
-        sell_price = price_info.get("sellPrice") or payload.get("sellPrice")
-        if sell_price is None:
-            raise ValueError(
-                f"Product {goods_no!r} is missing sell price: {payload!r}"
+        if isinstance(price_info, dict):
+            price_candidates.extend(
+                price_info.get(key)
+                for key in (
+                    "sellPrice",
+                    "salePrice",
+                    "bestPrice",
+                    "goodsPrice",
+                    "value",
+                )
             )
+
+        price_info_alt = payload.get("priceInfo") or {}
+        if isinstance(price_info_alt, dict):
+            price_candidates.extend(price_info_alt.values())
+
+        sell_price = _normalize_price(price_candidates)
 
         detail_url = str(
             payload.get("detailUrl")
             or payload.get("url")
             or payload.get("goodsDetailUrl")
+            or payload.get("pcDetailUrl")
+            or payload.get("itemDetailUrl")
+            or payload.get("detail")
+            or payload.get("linkUrl")
             or ""
         )
-        if not detail_url:
-            raise ValueError(
-                f"Product {goods_no!r} is missing a detail URL: {payload!r}"
-            )
 
-        return cls(id=goods_no, name=name, price=int(sell_price), url=detail_url)
+        if not detail_url:
+            detail_url = DETAIL_URL_TEMPLATE.format(goods_no=goods_no)
+
+        return cls(id=goods_no, name=name, price=sell_price, url=detail_url)
 
 
 def fetch_products(
@@ -229,16 +277,7 @@ def fetch_products(
     response.raise_for_status()
 
     payload = response.json()
-    raw_products: Iterable[Dict[str, object]]
-    if isinstance(payload, dict):
-        if "products" in payload:
-            raw_products = payload["products"]
-        elif "data" in payload and isinstance(payload["data"], dict):
-            raw_products = payload["data"].get("products", [])
-        else:
-            raw_products = []
-    else:
-        raw_products = []
+    raw_products = _extract_product_entries(payload)
 
     products: List[Product] = []
     for raw in raw_products:
@@ -248,6 +287,58 @@ def fetch_products(
             LOGGER.debug("Skipping product due to schema issue: %s", exc)
 
     return products
+
+
+def _extract_product_entries(payload: object) -> List[Dict[str, object]]:
+    """Return all dict entries that resemble GS Shop products."""
+
+    def _looks_like_product(item: Dict[str, object]) -> bool:
+        if not isinstance(item, dict):
+            return False
+        if not any(key in item and item[key] for key in ("goodsNo", "goodsId", "itemId", "id")):
+            return False
+        return any(
+            key in item and item[key]
+            for key in ("goodsNm", "goodsNm1", "goodsName", "productName", "name", "title")
+        )
+
+    collected: List[Dict[str, object]] = []
+    queue: List[object] = [payload]
+    seen: set[int] = set()
+
+    while queue:
+        current = queue.pop(0)
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+
+        if isinstance(current, list):
+            if current and all(isinstance(item, dict) for item in current) and any(
+                _looks_like_product(item) for item in current
+            ):
+                collected.extend(item for item in current if isinstance(item, dict))
+                continue
+            queue.extend(item for item in current if isinstance(item, (list, dict)))
+        elif isinstance(current, dict):
+            queue.extend(current.values())
+
+    return collected
+
+
+def _normalize_price(candidates: Iterable[object]) -> int:
+    """Return the first parseable price from ``candidates``."""
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, (int, float)):
+            return int(candidate)
+        if isinstance(candidate, str):
+            digits = "".join(ch for ch in candidate if ch.isdigit())
+            if digits:
+                return int(digits)
+    raise ValueError("No usable price value found in payload")
 
 
 def collect_products(
@@ -274,13 +365,19 @@ def collect_products(
     for base_url in candidates:
         LOGGER.info("Attempting to scrape products from %s", base_url)
         try:
-            return _collect_from_single_base(
+            products = _collect_from_single_base(
                 target_count=target_count,
                 page_size=page_size,
                 delay_seconds=delay_seconds,
                 headers=headers,
                 base_url=base_url,
                 params=dict(params),
+            )
+            if products:
+                return products
+            LOGGER.warning(
+                "Endpoint %s returned no products; trying the next candidate.",
+                base_url,
             )
         except requests.HTTPError as exc:
             last_error = exc
@@ -391,6 +488,11 @@ def main() -> None:
     logging.basicConfig(level=args.log_level.upper(), format="%(message)s")
 
     extra_params = parse_key_value_pairs(args.param)
+    if not any(key in extra_params for key in CATEGORY_PARAM_KEYS):
+        extra_params["msectid"] = DEFAULT_CATEGORY_ID
+        LOGGER.info(
+            "No category parameter provided; defaulting to msectid=%s", DEFAULT_CATEGORY_ID
+        )
     extra_headers = parse_key_value_pairs(args.header)
 
     candidate_base_urls = resolve_candidate_base_urls(args.base_url)

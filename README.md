@@ -21,9 +21,12 @@ source .venv/bin/activate
 pip install -r requirements.txt  # or manually install requests and pandas
 python scrape_gsshop.py \
   --target-count 1000 \
-  --page-size 60 \
-  --param msectid=1548240
+  --page-size 60
 ```
+
+> **Tip:** The script now automatically targets the liquor category
+> (`msectid=1548240`). Supply a custom `--param` if you need a different
+> section.
 
 Useful options:
 
@@ -35,8 +38,9 @@ Useful options:
   to probe a set of public endpoints that power the storefront.
 
 The script automatically attempts multiple API endpoints exposed to regular
-GS Shop visitors, so you can simply run it with the defaults. Adjust the field
-names inside `Product.from_payload` to match the live schema if necessary.
+GS Shop visitors, so you can simply run it with the defaults. The payload
+parser is defensive and copes with minor schema changes by looking for
+common GS Shop field names (`goodsNo`, `goodsNm`, `sellPrice`, etc.).
 
 ## Running from GitHub Actions
 
@@ -47,10 +51,11 @@ summary.
 
 1. Navigate to the **Actions** tab in GitHub and choose the "Run GS Shop scraper"
    workflow.
-2. (Optional) Provide a custom API endpoint together with any additional query
-   parameters or headers required by the live request. Separate multiple
-   parameters or headers with newlines. Leave the base URL as `auto` to rely on
-   the built-in list of public endpoints.
+2. Accept the defaults (they already request 1,000 items from
+   `msectid=1548240`) or provide custom inputs. Supply additional query
+   parameters or headers as newline-separated `KEY=VALUE` pairs when
+   needed. Leave the base URL as `auto` to rely on the built-in list of
+   public endpoints.
 3. Dispatch the workflow. Once the run completes you can download the generated
    CSV artifact or inspect the first few rows directly from the workflow run
    summary.

@@ -10,7 +10,7 @@ on:
       target_count:
         description: 'Number of products to collect'
         required: true
-        default: '100'
+        default: '1000'
       page_size:
         description: 'Products per request'
         required: true
@@ -26,7 +26,7 @@ on:
       extra_params:
         description: 'Optional KEY=VALUE query parameters separated by newlines'
         required: false
-        default: ''
+        default: 'msectid=1548240'
       extra_headers:
         description: 'Optional KEY=VALUE headers separated by newlines'
         required: false
@@ -108,20 +108,32 @@ jobs:
           try:
               with open(output_file, newline='', encoding='utf-8') as fh:
                   reader = csv.reader(fh)
-                  headers = next(reader)
-                  rows = list(itertools.islice(reader, 10))
+                  try:
+                      headers = next(reader)
+                  except StopIteration:
+                      headers = []
+                      rows = []
+                      total_rows = 0
+                  else:
+                      rows = list(itertools.islice(reader, 10))
+                      total_rows = len(rows) + sum(1 for _ in reader)
           except FileNotFoundError:
               headers = []
               rows = []
+              total_rows = 0
           with open(summary_path, "a", encoding="utf-8") as summary:
               summary.write(f"## Preview of {output_file}\n\n")
-              if headers and rows:
-                  summary.write("| " + " | ".join(headers) + " |\n")
-                  summary.write("| " + " | ".join("---" for _ in headers) + " |\n")
-                  for row in rows:
-                      summary.write("| " + " | ".join(row) + " |\n")
-                  if len(rows) == 10:
-                      summary.write("\nShowing first 10 rows.\n")
+              if headers:
+                  summary.write(f"Collected {total_rows} products.\n\n")
+                  if rows:
+                      summary.write("| " + " | ".join(headers) + " |\n")
+                      summary.write("| " + " | ".join("---" for _ in headers) + " |\n")
+                      for row in rows:
+                          summary.write("| " + " | ".join(row) + " |\n")
+                      if len(rows) == 10:
+                          summary.write("\nShowing first 10 rows.\n")
+                  else:
+                      summary.write("No rows available to preview.\n")
               else:
                   summary.write("No rows available to preview.\n")
           PY
