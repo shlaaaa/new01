@@ -1,0 +1,126 @@
+name: Run GS Shop scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'GS Shop product API endpoint captured from the browser network panel'
+        required: true
+      target_count:
+        description: 'Number of products to collect'
+        required: true
+        default: '100'
+      page_size:
+        description: 'Products per request'
+        required: true
+        default: '60'
+      delay:
+        description: 'Delay between requests in seconds'
+        required: true
+        default: '1.0'
+      output_filename:
+        description: 'Filename for the generated CSV artifact'
+        required: true
+        default: 'gsshop_liquor.csv'
+      extra_params:
+        description: 'Optional KEY=VALUE query parameters separated by newlines'
+        required: false
+        default: ''
+      extra_headers:
+        description: 'Optional KEY=VALUE headers separated by newlines'
+        required: false
+        default: ''
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          BASE_URL_INPUT: ${{ github.event.inputs.base_url }}
+          TARGET_COUNT_INPUT: ${{ github.event.inputs.target_count }}
+          PAGE_SIZE_INPUT: ${{ github.event.inputs.page_size }}
+          DELAY_INPUT: ${{ github.event.inputs.delay }}
+          OUTPUT_FILE: ${{ github.event.inputs.output_filename }}
+          PARAMS_INPUT: ${{ github.event.inputs.extra_params }}
+          HEADERS_INPUT: ${{ github.event.inputs.extra_headers }}
+        run: |
+          set -euo pipefail
+          PARAM_ARGS=()
+          if [ -n "${PARAMS_INPUT}" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                PARAM_ARGS+=(--param "$line")
+              fi
+            done <<< "${PARAMS_INPUT}"
+          fi
+
+          HEADER_ARGS=()
+          if [ -n "${HEADERS_INPUT}" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                HEADER_ARGS+=(--header "$line")
+              fi
+            done <<< "${HEADERS_INPUT}"
+          fi
+
+          python scrape_gsshop.py \
+            --base-url "${BASE_URL_INPUT}" \
+            --target-count "${TARGET_COUNT_INPUT}" \
+            --page-size "${PAGE_SIZE_INPUT}" \
+            --delay "${DELAY_INPUT}" \
+            --output "${OUTPUT_FILE}" \
+            "${PARAM_ARGS[@]}" \
+            "${HEADER_ARGS[@]}"
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: liquor-products
+          path: ${{ github.event.inputs.output_filename }}
+          if-no-files-found: error
+
+      - name: Publish summary preview
+        if: success()
+        env:
+          OUTPUT_FILE: ${{ github.event.inputs.output_filename }}
+        run: |
+          python - <<'PY'
+          import csv
+          import itertools
+          import os
+          output_file = os.environ["OUTPUT_FILE"]
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          try:
+              with open(output_file, newline='', encoding='utf-8') as fh:
+                  reader = csv.reader(fh)
+                  headers = next(reader)
+                  rows = list(itertools.islice(reader, 10))
+          except FileNotFoundError:
+              headers = []
+              rows = []
+          with open(summary_path, "a", encoding="utf-8") as summary:
+              summary.write(f"## Preview of {output_file}\n\n")
+              if headers and rows:
+                  summary.write("| " + " | ".join(headers) + " |\n")
+                  summary.write("| " + " | ".join("---" for _ in headers) + " |\n")
+                  for row in rows:
+                      summary.write("| " + " | ".join(row) + " |\n")
+                  if len(rows) == 10:
+                      summary.write("\nShowing first 10 rows.\n")
+              else:
+                  summary.write("No rows available to preview.\n")
+          PY
