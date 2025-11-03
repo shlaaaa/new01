@@ -58,6 +58,10 @@ jobs:
           OUTPUT_FILE: ${{ github.event.inputs.output_filename }}
           PARAMS_INPUT: ${{ github.event.inputs.extra_params }}
           HEADERS_INPUT: ${{ github.event.inputs.extra_headers }}
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          http_proxy: ""
+          https_proxy: ""
           NO_PROXY: gsshop.com,.gsshop.com
           no_proxy: gsshop.com,.gsshop.com
         run: |
