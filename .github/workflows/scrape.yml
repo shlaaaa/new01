@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       base_url:
-        description: 'GS Shop product API endpoint captured from the browser network panel'
-        required: true
+        description: 'GS Shop product API endpoint (set to auto for built-in public endpoints)'
+        required: false
+        default: 'auto'
       target_count:
         description: 'Number of products to collect'
         required: true
