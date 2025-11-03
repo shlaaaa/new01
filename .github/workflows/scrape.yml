@@ -58,6 +58,12 @@ jobs:
           OUTPUT_FILE: ${{ github.event.inputs.output_filename }}
           PARAMS_INPUT: ${{ github.event.inputs.extra_params }}
           HEADERS_INPUT: ${{ github.event.inputs.extra_headers }}
+          HTTP_PROXY: ""
+          HTTPS_PROXY: ""
+          http_proxy: ""
+          https_proxy: ""
+          NO_PROXY: www.gsshop.com,api.gsshop.com
+          no_proxy: www.gsshop.com,api.gsshop.com
         run: |
           set -euo pipefail
           PARAM_ARGS=()
