@@ -49,7 +49,8 @@ BASE_URL = "https://www.gsshop.com/some/product/api"
 Replace this value with the actual API endpoint captured from the
 Network panel (typically an endpoint such as
 ``https://api.gsshop.com/prdw/store/v1/goods``).  The remainder of the
-module is agnostic to the specific endpoint structure.
+module is agnostic to the specific endpoint structure, and callers can
+override the value at runtime via the ``--base-url`` CLI flag.
 """
 
 REFERER_URL = "https://www.gsshop.com/shop/wine/cate.gs?msectid=1548240"
@@ -128,6 +129,7 @@ def fetch_products(
     page_size: int,
     headers: Optional[Dict[str, str]] = None,
     session: Optional[requests.Session] = None,
+    base_url: str = BASE_URL,
     **params: object,
 ) -> List[Product]:
     """Fetch a single page of products from the GS Shop API.
@@ -145,6 +147,8 @@ def fetch_products(
         :data:`DEFAULT_HEADERS` are used.
     session:
         Optional :class:`requests.Session` for connection pooling.
+    base_url:
+        The product API endpoint captured from browser developer tools.
     **params:
         Additional query parameters forwarded to the request (for
         example ``msectid`` or ``disp_ctg_no``).
@@ -156,8 +160,8 @@ def fetch_products(
 
     query_params = {"page": page, "size": page_size, **params}
     http = session or requests
-    LOGGER.debug("Requesting %s with params %s", BASE_URL, query_params)
-    response = http.get(BASE_URL, headers=request_headers, params=query_params, timeout=10)
+    LOGGER.debug("Requesting %s with params %s", base_url, query_params)
+    response = http.get(base_url, headers=request_headers, params=query_params, timeout=10)
     response.raise_for_status()
 
     payload = response.json()
@@ -187,9 +191,17 @@ def collect_products(
     page_size: int = 60,
     delay_seconds: float = 1.0,
     headers: Optional[Dict[str, str]] = None,
+    base_url: str = BASE_URL,
     **params: object,
 ) -> List[Product]:
-    """Collect products until ``target_count`` unique items are gathered."""
+    """Collect products until ``target_count`` unique items are gathered.
+
+    Parameters
+    ----------
+    base_url:
+        Product API endpoint used for fetching data. Override the default
+        when invoking the script from environments such as GitHub Actions.
+    """
 
     items: Dict[str, Product] = {}
     page = 1
@@ -201,6 +213,7 @@ def collect_products(
             page_size=page_size,
             headers=headers,
             session=session,
+            base_url=base_url,
             **params,
         )
 
@@ -266,6 +279,11 @@ def parse_args() -> argparse.Namespace:
         help="CSV file to write results to (default: gsshop_liquor.csv)",
     )
     parser.add_argument(
+        "--base-url",
+        default=BASE_URL,
+        help="GS Shop product API endpoint to call",
+    )
+    parser.add_argument(
         "--param",
         action="append",
         default=[],
@@ -319,6 +337,7 @@ def main() -> None:
         page_size=args.page_size,
         delay_seconds=args.delay,
         headers={**DEFAULT_HEADERS, **extra_headers} if extra_headers else None,
+        base_url=args.base_url,
         **extra_params,
     )
 
